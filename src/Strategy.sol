@@ -3,6 +3,11 @@ pragma solidity ^0.8.18;
 
 import {BaseStrategy, ERC20} from "@tokenized-strategy/BaseStrategy.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+
+import {IWETH} from "./interfaces/IWETH.sol";
+import {IStEth} from "./interfaces/Lido/IStETH.sol";
+import {ICurve} from "./interfaces/Curve/ICurve.sol";
 
 // Import interfaces for many popular DeFi projects, or add your own!
 //import "../interfaces/<protocol>/<Interface>.sol";
@@ -23,10 +28,28 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 contract Strategy is BaseStrategy {
     using SafeERC20 for ERC20;
 
+    IWETH public constant WETH =
+        IWETH(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
+    IStEth public constant StETH =
+        IStEth(0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84);
+    ICurve public constant CURVE_POOL =
+        ICurve(0xDC24316b9AE028F1497c275EB9192a3Ea0f67022);
+    address private constant REFERRAL =
+        0x16388463d60FFE0661Cf7F1f31a7D658aC790ff7;
+    int128 private constant ETH_CRV_LP_IDX = 0;
+    int128 private constant LST_CRV_LP_IDX = 1;
+    uint256 private constant MAX_BPS = 10_000;
+
+    uint96 public maxSingleTrade = 1_000e18;
+    uint16 public maxSlippageBps = 500;
+
     constructor(
         address _asset,
         string memory _name
     ) BaseStrategy(_asset, _name) {}
+
+    // Make eth receivable
+    receive() external payable {}
 
     /*//////////////////////////////////////////////////////////////
                 NEEDED TO BE OVERRIDDEN BY STRATEGIST
@@ -44,9 +67,25 @@ contract Strategy is BaseStrategy {
      * to deposit in the yield source.
      */
     function _deployFunds(uint256 _amount) internal override {
-        // TODO: implement deposit logic EX:
-        //
-        //      lendingPool.deposit(address(asset), _amount ,0);
+        _amount = Math.min(_amount, maxSingleTrade);
+
+        WETH.withdraw(_amount);
+
+        uint256 _amountOut = CURVE_POOL.get_dy(
+            ETH_CRV_LP_IDX,
+            LST_CRV_LP_IDX,
+            _amount
+        );
+        if (_amountOut < _amount) {
+            StETH.submit{value: _amount}(REFERRAL);
+        } else {
+            CURVE_POOL.exchange{value: _amount}(
+                ETH_CRV_LP_IDX,
+                LST_CRV_LP_IDX,
+                _amount,
+                _amount
+            );
+        }
     }
 
     /**
@@ -71,9 +110,20 @@ contract Strategy is BaseStrategy {
      * @param _amount, The amount of 'asset' to be freed.
      */
     function _freeFunds(uint256 _amount) internal override {
-        // TODO: implement withdraw logic EX:
-        //
-        //      lendingPool.withdraw(address(asset), _amount);
+
+        // implement queue withdraw
+
+        uint256 slippageAllowance = (_amount * (MAX_BPS - maxSlippageBps)) /
+            MAX_BPS;
+
+        CURVE_POOL.exchange(
+            LST_CRV_LP_IDX,
+            ETH_CRV_LP_IDX,
+            _amount,
+            slippageAllowance
+        );
+
+        WETH.deposit{value: address(this).balance}();
     }
 
     /**
@@ -103,13 +153,6 @@ contract Strategy is BaseStrategy {
         override
         returns (uint256 _totalAssets)
     {
-        // TODO: Implement harvesting logic and accurate accounting EX:
-        //
-        //      if(!TokenizedStrategy.isShutdown()) {
-        //          _claimAndSellRewards();
-        //      }
-        //      _totalAssets = aToken.balanceOf(address(this)) + asset.balanceOf(address(this));
-        //
         _totalAssets = asset.balanceOf(address(this));
     }
 
@@ -151,38 +194,6 @@ contract Strategy is BaseStrategy {
     }
 
     /**
-     * @notice Gets the max amount of `asset` that an address can deposit.
-     * @dev Defaults to an unlimited amount for any address. But can
-     * be overridden by strategists.
-     *
-     * This function will be called before any deposit or mints to enforce
-     * any limits desired by the strategist. This can be used for either a
-     * traditional deposit limit or for implementing a whitelist etc.
-     *
-     *   EX:
-     *      if(isAllowed[_owner]) return super.availableDepositLimit(_owner);
-     *
-     * This does not need to take into account any conversion rates
-     * from shares to assets. But should know that any non max uint256
-     * amounts may be converted to shares. So it is recommended to keep
-     * custom amounts low enough as not to cause overflow when multiplied
-     * by `totalSupply`.
-     *
-     * @param . The address that is depositing into the strategy.
-     * @return . The available amount the `_owner` can deposit in terms of `asset`
-     *
-    function availableDepositLimit(
-        address _owner
-    ) public view override returns (uint256) {
-        TODO: If desired Implement deposit limit logic and any needed state variables .
-        
-        EX:    
-            uint256 totalAssets = TokenizedStrategy.totalAssets();
-            return totalAssets >= depositLimit ? 0 : depositLimit - totalAssets;
-    }
-    */
-
-    /**
      * @dev Optional function for strategist to override that can
      *  be called in between reports.
      *
@@ -203,8 +214,12 @@ contract Strategy is BaseStrategy {
      *
      * @param _totalIdle The current amount of idle funds that are available to deploy.
      *
-    function _tend(uint256 _totalIdle) internal override {}
-    */
+     */
+    function _tend(uint256 _totalIdle) internal override {
+        if (_totalIdle > 0) {
+            _deployFunds(_totalIdle);
+        }
+    }
 
     /**
      * @dev Optional trigger to override if tend() will be used by the strategy.
