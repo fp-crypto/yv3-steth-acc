@@ -14,3 +14,6 @@
 	path = lib/tokenized-strategy
 	url = https://github.com/yearn/tokenized-strategy
 	branch = v3.0.2-1
+[submodule "lib/lido"]
+	path = lib/lido
+	url = https://github.com/lidofinance/core
