@@ -1,31 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0
 pragma solidity ^0.8.18;
 
-import {BaseStrategy, ERC20} from "@tokenized-strategy/BaseStrategy.sol";
+import {BaseHealthCheck, ERC20} from "@periphery/Bases/HealthCheck/BaseHealthCheck.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {IWETH} from "./interfaces/IWETH.sol";
 import {IStEth} from "./interfaces/Lido/IStETH.sol";
+import {IQueue} from "./interfaces/Lido/IQueue.sol";
 import {ICurve} from "./interfaces/Curve/ICurve.sol";
 
-// Import interfaces for many popular DeFi projects, or add your own!
-//import "../interfaces/<protocol>/<Interface>.sol";
-
-/**
- * The `TokenizedStrategy` variable can be used to retrieve the strategies
- * specific storage data your contract.
- *
- *       i.e. uint256 totalAssets = TokenizedStrategy.totalAssets()
- *
- * This can not be used for write functions. Any TokenizedStrategy
- * variables that need to be updated post deployment will need to
- * come from an external call from the strategies specific `management`.
- */
-
-// NOTE: To implement permissioned functions you can use the onlyManagement, onlyEmergencyAuthorized and onlyKeepers modifiers
-
-contract Strategy is BaseStrategy {
+contract Strategy is BaseHealthCheck {
     using SafeERC20 for ERC20;
 
     IWETH public constant WETH =
@@ -34,11 +19,13 @@ contract Strategy is BaseStrategy {
         IStEth(0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84);
     ICurve public constant CURVE_POOL =
         ICurve(0xDC24316b9AE028F1497c275EB9192a3Ea0f67022);
+    IQueue internal constant LIDO_WITHDRAWAL_QUEUE =
+        IQueue(0x889edC2eDab5f40e902b864aD4d7AdE8E412F9B1);
+
     address private constant REFERRAL =
         0x16388463d60FFE0661Cf7F1f31a7D658aC790ff7;
     int128 private constant ETH_CRV_LP_IDX = 0;
     int128 private constant LST_CRV_LP_IDX = 1;
-    uint256 private constant MAX_BPS = 10_000;
 
     uint96 public maxSingleTrade = 1_000e18;
     uint16 public maxSlippageBps = 500;
@@ -46,13 +33,26 @@ contract Strategy is BaseStrategy {
     constructor(
         address _asset,
         string memory _name
-    ) BaseStrategy(_asset, _name) {}
+    ) BaseHealthCheck(_asset, _name) {}
 
     // Make eth receivable
     receive() external payable {}
 
     /*//////////////////////////////////////////////////////////////
-                NEEDED TO BE OVERRIDDEN BY STRATEGIST
+                            Custom Views
+    //////////////////////////////////////////////////////////////*/
+
+    function estimatedTotalAssets() public view returns (uint256) {
+        uint256 _lstBalance = StETH.balanceOf(address(this));
+        _lstBalance =
+            (_lstBalance * (MAX_BPS - uint256(maxSlippageBps))) /
+            MAX_BPS;
+
+        return asset.balanceOf(address(this)) + _lstBalance;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        BaseStrategy Overrides 
     //////////////////////////////////////////////////////////////*/
 
     /**
@@ -76,7 +76,7 @@ contract Strategy is BaseStrategy {
             LST_CRV_LP_IDX,
             _amount
         );
-        if (_amountOut < _amount) {
+        if (_amountOut < _amount && !StETH.isStakingPaused()) {
             StETH.submit{value: _amount}(REFERRAL);
         } else {
             CURVE_POOL.exchange{value: _amount}(
@@ -110,17 +110,16 @@ contract Strategy is BaseStrategy {
      * @param _amount, The amount of 'asset' to be freed.
      */
     function _freeFunds(uint256 _amount) internal override {
-
         // implement queue withdraw
 
-        uint256 slippageAllowance = (_amount * (MAX_BPS - maxSlippageBps)) /
-            MAX_BPS;
+        uint256 _slippageAllowance = (_amount *
+            (MAX_BPS - uint256(maxSlippageBps))) / MAX_BPS;
 
         CURVE_POOL.exchange(
             LST_CRV_LP_IDX,
             ETH_CRV_LP_IDX,
             _amount,
-            slippageAllowance
+            _slippageAllowance
         );
 
         WETH.deposit{value: address(this).balance}();
@@ -153,12 +152,9 @@ contract Strategy is BaseStrategy {
         override
         returns (uint256 _totalAssets)
     {
-        _totalAssets = asset.balanceOf(address(this));
+        _tend(asset.balanceOf(address(this)));
+        _totalAssets = estimatedTotalAssets();
     }
-
-    /*//////////////////////////////////////////////////////////////
-                    OPTIONAL TO OVERRIDE BY STRATEGIST
-    //////////////////////////////////////////////////////////////*/
 
     /**
      * @notice Gets the max amount of `asset` that can be withdrawn.
@@ -181,16 +177,8 @@ contract Strategy is BaseStrategy {
     function availableWithdrawLimit(
         address /*_owner*/
     ) public view override returns (uint256) {
-        // NOTE: Withdraw limitations such as liquidity constraints should be accounted for HERE
-        //  rather than _freeFunds in order to not count them as losses on withdraws.
-
-        // TODO: If desired implement withdraw limit logic and any needed state variables.
-
-        // EX:
-        // if(yieldSource.notShutdown()) {
-        //    return asset.balanceOf(address(this)) + asset.balanceOf(yieldSource);
-        // }
-        return asset.balanceOf(address(this));
+        // TODO: something better?
+        return asset.balanceOf(address(this)) + maxSingleTrade;
     }
 
     /**
@@ -227,8 +215,11 @@ contract Strategy is BaseStrategy {
      *
      * @return . Should return true if tend() should be called by keeper or false if not.
      *
-    function _tendTrigger() internal view override returns (bool) {}
-    */
+     */
+    function _tendTrigger() internal view override returns (bool) {
+        // TODO: Implement
+        return false;
+    }
 
     /**
      * @dev Optional function for a strategist to override that will
@@ -251,13 +242,44 @@ contract Strategy is BaseStrategy {
      *
      * @param _amount The amount of asset to attempt to free.
      *
+     */
     function _emergencyWithdraw(uint256 _amount) internal override {
-        TODO: If desired implement simple logic to free deployed funds.
-
-        EX:
-            _amount = min(_amount, aToken.balanceOf(address(this)));
-            _freeFunds(_amount);
+        // TODO: needs more?
+        _freeFunds(_amount);
     }
 
-    */
+    /*//////////////////////////////////////////////////////////////
+                       Custom Management Methods 
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Set maxSlippageBps to new value
+    /// @param _maxSlippageBps new maxSlippageBps value
+    function setMaxSlippageBps(uint16 _maxSlippageBps) external onlyManagement {
+        require(_maxSlippageBps < MAX_BPS);
+        maxSlippageBps = _maxSlippageBps;
+    }
+
+    /// @notice Set maxSingleTrade to new value
+    /// @param _maxSingleTrade new maxSlippageBps value
+    function setMaxSingleTrade(uint96 _maxSingleTrade) external onlyManagement {
+        maxSingleTrade = _maxSingleTrade;
+    }
+
+    /// @notice Initiate a liquid staking token (LST) withdrawal process to redeem 1:1. Returns requestIds which can be used to claim asset into the strategy.
+    /// @param _amounts the amounts of LST to initiate a withdrawal process for.
+    function initiateLSTwithdrawal(
+        uint256[] calldata _amounts
+    ) external onlyManagement returns (uint256[] memory requestIds) {
+        requestIds = LIDO_WITHDRAWAL_QUEUE.requestWithdrawals(
+            _amounts,
+            address(this)
+        );
+    }
+
+    /// @notice Claim asset from a liquid staking token (LST) withdrawal process to redeem 1:1. Use the requestId from initiateLSTwithdrawal() as argument.
+    /// @param _requestId return from calling initiateLSTwithdrawal() to identify the withdrawal.
+    function claimLSTwithdrawal(uint256 _requestId) external onlyManagement {
+        LIDO_WITHDRAWAL_QUEUE.claimWithdrawal(_requestId);
+        WETH.deposit{value: address(this).balance}();
+    }
 }

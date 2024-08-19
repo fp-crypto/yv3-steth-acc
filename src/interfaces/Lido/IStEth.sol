@@ -6,4 +6,5 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 interface IStEth is IERC20 {
     function submit(address) external payable returns (uint256);
+    function isStakingPaused() external returns (bool);
 }
