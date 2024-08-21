@@ -1,6 +1,6 @@
 pragma solidity ^0.8.18;
 
-import "forge-std/console2.sol";
+import "forge-std/console.sol";
 import {Setup} from "./utils/Setup.sol";
 
 import {StrategyAprOracle} from "../periphery/StrategyAprOracle.sol";
@@ -58,6 +58,4 @@ contract OracleTest is Setup {
 
         checkOracle(address(strategy), _delta);
     }
-
-    // TODO: Deploy multiple strategies with different tokens as `asset` to test against the oracle.
 }

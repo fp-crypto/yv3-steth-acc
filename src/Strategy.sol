@@ -27,13 +27,19 @@ contract Strategy is BaseHealthCheck {
     int128 private constant ETH_CRV_LP_IDX = 0;
     int128 private constant LST_CRV_LP_IDX = 1;
 
+    uint16 public maxTendBasefeeGwei = 1; // 1 gwei
     uint96 public maxSingleTrade = 1_000e18;
-    uint16 public maxSlippageBps = 500;
+    uint16 public maxSlippageBps = 100;
+    uint16 public lstDiscountBps = 50;
+    uint8 public lstOutstandingWithdrawCount;
+
+    bool public openDeposits;
+    uint256 public depositLimit;
+    mapping(address => bool) public allowedDepositors;
 
     constructor(
-        address _asset,
         string memory _name
-    ) BaseHealthCheck(_asset, _name) {}
+    ) BaseHealthCheck(address(WETH), _name) {}
 
     // Make eth receivable
     receive() external payable {}
@@ -56,17 +62,12 @@ contract Strategy is BaseHealthCheck {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @dev Can deploy up to '_amount' of 'asset' in the yield source.
-     *
-     * This function is called at the end of a {deposit} or {mint}
-     * call. Meaning that unless a whitelist is implemented it will
-     * be entirely permissionless and thus can be sandwiched or otherwise
-     * manipulated.
-     *
      * @param _amount The amount of 'asset' that the strategy can attempt
      * to deposit in the yield source.
      */
     function _deployFunds(uint256 _amount) internal override {
+        if (lstOutstandingWithdrawCount != 0) return;
+
         _amount = Math.min(_amount, maxSingleTrade);
 
         WETH.withdraw(_amount);
@@ -83,34 +84,15 @@ contract Strategy is BaseHealthCheck {
                 ETH_CRV_LP_IDX,
                 LST_CRV_LP_IDX,
                 _amount,
-                _amount
+                _amountOut
             );
         }
     }
 
     /**
-     * @dev Should attempt to free the '_amount' of 'asset'.
-     *
-     * NOTE: The amount of 'asset' that is already loose has already
-     * been accounted for.
-     *
-     * This function is called during {withdraw} and {redeem} calls.
-     * Meaning that unless a whitelist is implemented it will be
-     * entirely permissionless and thus can be sandwiched or otherwise
-     * manipulated.
-     *
-     * Should not rely on asset.balanceOf(address(this)) calls other than
-     * for diff accounting purposes.
-     *
-     * Any difference between `_amount` and what is actually freed will be
-     * counted as a loss and passed on to the withdrawer. This means
-     * care should be taken in times of illiquidity. It may be better to revert
-     * if withdraws are simply illiquid so not to realize incorrect losses.
-     *
      * @param _amount, The amount of 'asset' to be freed.
      */
     function _freeFunds(uint256 _amount) internal override {
-        // implement queue withdraw
 
         uint256 _slippageAllowance = (_amount *
             (MAX_BPS - uint256(maxSlippageBps))) / MAX_BPS;
@@ -126,24 +108,6 @@ contract Strategy is BaseHealthCheck {
     }
 
     /**
-     * @dev Internal function to harvest all rewards, redeploy any idle
-     * funds and return an accurate accounting of all funds currently
-     * held by the Strategy.
-     *
-     * This should do any needed harvesting, rewards selling, accrual,
-     * redepositing etc. to get the most accurate view of current assets.
-     *
-     * NOTE: All applicable assets including loose assets should be
-     * accounted for in this function.
-     *
-     * Care should be taken when relying on oracles or swap values rather
-     * than actual amounts as all Strategy profit/loss accounting will
-     * be done based on this returned value.
-     *
-     * This can still be called post a shutdown, a strategist can check
-     * `TokenizedStrategy.isShutdown()` to decide if funds should be
-     * redeployed or simply realize any profits/losses.
-     *
      * @return _totalAssets A trusted and accurate account for the total
      * amount of 'asset' the strategy currently holds including idle funds.
      */
@@ -157,20 +121,21 @@ contract Strategy is BaseHealthCheck {
     }
 
     /**
+     * @notice Gets the max amount of `asset` that an address can deposit.
+     * @param . The address that is depositing into the strategy.
+     * @return . The available amount the `_owner` can deposit in terms of `asset`
+     */
+    function availableDepositLimit(
+        address _owner
+    ) public view override returns (uint256) {
+        if (!openDeposits && !allowedDepositors[_owner]) return 0;
+
+        uint256 _totalAssets = TokenizedStrategy.totalAssets();
+        return _totalAssets >= depositLimit ? 0 : depositLimit - _totalAssets;
+    }
+
+    /**
      * @notice Gets the max amount of `asset` that can be withdrawn.
-     * @dev Defaults to an unlimited amount for any address. But can
-     * be overridden by strategists.
-     *
-     * This function will be called before any withdraw or redeem to enforce
-     * any limits desired by the strategist. This can be used for illiquid
-     * or sandwichable strategies.
-     *
-     *   EX:
-     *       return asset.balanceOf(yieldSource);
-     *
-     * This does not need to take into account the `_owner`'s share balance
-     * or conversion rates from shares to assets.
-     *
      * @param . The address that is withdrawing from the strategy.
      * @return . The available amount that can be withdrawn in terms of `asset`
      */
@@ -182,26 +147,7 @@ contract Strategy is BaseHealthCheck {
     }
 
     /**
-     * @dev Optional function for strategist to override that can
-     *  be called in between reports.
-     *
-     * If '_tend' is used tendTrigger() will also need to be overridden.
-     *
-     * This call can only be called by a permissioned role so may be
-     * through protected relays.
-     *
-     * This can be used to harvest and compound rewards, deposit idle funds,
-     * perform needed position maintenance or anything else that doesn't need
-     * a full report for.
-     *
-     *   EX: A strategy that can not deposit funds without getting
-     *       sandwiched can use the tend when a certain threshold
-     *       of idle to totalAssets has been reached.
-     *
-     * This will have no effect on PPS of the strategy till report() is called.
-     *
      * @param _totalIdle The current amount of idle funds that are available to deploy.
-     *
      */
     function _tend(uint256 _totalIdle) internal override {
         if (_totalIdle > 0) {
@@ -210,38 +156,35 @@ contract Strategy is BaseHealthCheck {
     }
 
     /**
-     * @dev Optional trigger to override if tend() will be used by the strategy.
-     * This must be implemented if the strategy hopes to invoke _tend().
-     *
      * @return . Should return true if tend() should be called by keeper or false if not.
-     *
      */
     function _tendTrigger() internal view override returns (bool) {
-        // TODO: Implement
+        if (TokenizedStrategy.totalAssets() == 0) {
+            return false;
+        }
+
+        uint256 _maxTendBasefeeGwei = uint256(maxTendBasefeeGwei);
+        if (
+            _maxTendBasefeeGwei != 0 &&
+            block.basefee >= _maxTendBasefeeGwei * 1e9
+        ) {
+            return false;
+        }
+
+        if (TokenizedStrategy.isShutdown()) {
+            return false;
+        }
+
+        // TODO: come up with a minimum to tend
+        if (asset.balanceOf(address(this)) >= maxSingleTrade) {
+            return true;
+        }
+
         return false;
     }
 
     /**
-     * @dev Optional function for a strategist to override that will
-     * allow management to manually withdraw deployed funds from the
-     * yield source if a strategy is shutdown.
-     *
-     * This should attempt to free `_amount`, noting that `_amount` may
-     * be more than is currently deployed.
-     *
-     * NOTE: This will not realize any profits or losses. A separate
-     * {report} will be needed in order to record any profit/loss. If
-     * a report may need to be called after a shutdown it is important
-     * to check if the strategy is shutdown during {_harvestAndReport}
-     * so that it does not simply re-deploy all funds that had been freed.
-     *
-     * EX:
-     *   if(freeAsset > 0 && !TokenizedStrategy.isShutdown()) {
-     *       depositFunds...
-     *    }
-     *
      * @param _amount The amount of asset to attempt to free.
-     *
      */
     function _emergencyWithdraw(uint256 _amount) internal override {
         // TODO: needs more?
@@ -252,10 +195,28 @@ contract Strategy is BaseHealthCheck {
                        Custom Management Methods 
     //////////////////////////////////////////////////////////////*/
 
+    /**
+     * @notice Sets the deposit limit. Can only be called by management
+     * @param _depositLimit The deposit limit
+     */
+    function setDepositLimit(uint256 _depositLimit) external onlyManagement {
+        depositLimit = _depositLimit;
+    }
+
+    /**
+     * @notice Sets the max base fee for tends. Can only be called by management
+     * @param _maxTendBasefeeGwei The maximum base fee allowed in gwei
+     */
+    function setMaxTendBasefeeGwei(
+        uint16 _maxTendBasefeeGwei
+    ) external onlyManagement {
+        maxTendBasefeeGwei = _maxTendBasefeeGwei;
+    }
+
     /// @notice Set maxSlippageBps to new value
     /// @param _maxSlippageBps new maxSlippageBps value
     function setMaxSlippageBps(uint16 _maxSlippageBps) external onlyManagement {
-        require(_maxSlippageBps < MAX_BPS);
+        require(_maxSlippageBps < 1_000); // dev: must be less than 10%
         maxSlippageBps = _maxSlippageBps;
     }
 
@@ -265,21 +226,46 @@ contract Strategy is BaseHealthCheck {
         maxSingleTrade = _maxSingleTrade;
     }
 
+    /// @notice Set lstDiscountBps to new value
+    /// @param _lstDiscountBps new lstDiscountBps value
+    function setLstDiscountBps(uint16 _lstDiscountBps) external onlyManagement {
+        require(_lstDiscountBps < 1_000); // dev: must be less than 10%
+        lstDiscountBps = _lstDiscountBps;
+    }
+
+    /// @notice Set openDeposits to new value
+    /// @param _openDeposits new openDeposits value
+    function setOpenDeposits(bool _openDeposits) external onlyManagement {
+        openDeposits = _openDeposits;
+    }
+
+    /// @notice Set whether a depositor is allowed or not 
+    /// @param _depositor the depositor to allow/disallow
+    /// @param _allowed whether the depositor is allowed 
+    function setAllowedDepositor(address _depositor, bool _allowed) external onlyManagement {
+        allowedDepositors[_depositor] = _allowed;
+    }
+
     /// @notice Initiate a liquid staking token (LST) withdrawal process to redeem 1:1. Returns requestIds which can be used to claim asset into the strategy.
-    /// @param _amounts the amounts of LST to initiate a withdrawal process for.
+    /// @param _amount the amount of LST to initiate a withdrawal process for.
     function initiateLSTwithdrawal(
-        uint256[] calldata _amounts
-    ) external onlyManagement returns (uint256[] memory requestIds) {
-        requestIds = LIDO_WITHDRAWAL_QUEUE.requestWithdrawals(
+        uint256 _amount
+    ) external onlyManagement returns (uint256 requestId) {
+        uint256[] memory _amounts = new uint256[](1);
+        _amounts[0] = _amount;
+        uint256[] memory requestIds = LIDO_WITHDRAWAL_QUEUE.requestWithdrawals(
             _amounts,
             address(this)
         );
+        requestId = requestIds[0];
+        lstOutstandingWithdrawCount++;
     }
 
     /// @notice Claim asset from a liquid staking token (LST) withdrawal process to redeem 1:1. Use the requestId from initiateLSTwithdrawal() as argument.
     /// @param _requestId return from calling initiateLSTwithdrawal() to identify the withdrawal.
-    function claimLSTwithdrawal(uint256 _requestId) external onlyManagement {
+    function claimLSTwithdrawal(uint256 _requestId) external onlyKeepers {
         LIDO_WITHDRAWAL_QUEUE.claimWithdrawal(_requestId);
         WETH.deposit{value: address(this).balance}();
+        lstOutstandingWithdrawCount--;
     }
 }
