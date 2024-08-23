@@ -31,7 +31,7 @@ contract Strategy is BaseHealthCheck {
     int128 private constant LST_CRV_LP_IDX = 1;
 
     uint16 public maxTendBasefeeGwei = 5; // 5 gwei
-    uint96 public maxSingleTrade = 1_000e18;
+    uint96 public maxSingleTrade = 1000e18;
     uint16 public maxSlippageBps = 100;
     uint16 public lstDiscountBps = 50;
     uint8 public lstOutstandingWithdrawCount;
@@ -84,21 +84,15 @@ contract Strategy is BaseHealthCheck {
 
         WETH.withdraw(_amount);
 
-        uint256 _amountOut = CURVE_POOL.get_dy(
-            ETH_CRV_LP_IDX,
-            LST_CRV_LP_IDX,
-            _amount
+        (bool _success, ) = address(CURVE_POOL).call{value: _amount}(
+            abi.encodeCall(
+                CURVE_POOL.exchange,
+                (ETH_CRV_LP_IDX, LST_CRV_LP_IDX, _amount, _amount)
+            )
         );
-        if (_amountOut < _amount && !STETH.isStakingPaused()) {
+
+        if (!_success && !STETH.isStakingPaused())
             STETH.submit{value: _amount}(REFERRAL);
-        } else {
-            CURVE_POOL.exchange{value: _amount}(
-                ETH_CRV_LP_IDX,
-                LST_CRV_LP_IDX,
-                _amount,
-                _amountOut
-            );
-        }
     }
 
     /**
