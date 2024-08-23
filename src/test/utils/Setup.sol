@@ -48,6 +48,10 @@ contract Setup is ExtendedTest, IEvents {
     // Default profit max unlock time is set for 10 days
     uint256 public profitMaxUnlockTime = 10 days;
 
+    uint256 public lstAprWad = 0.03e18;
+    uint256 public constant SECONDS_PER_YEAR = 31_536_000;
+    address public stethWhale = 0x98078db053902644191f93988341E31289E1C8FE;
+
     function setUp() public virtual {
         _setTokenAddrs();
 
@@ -137,6 +141,16 @@ contract Setup is ExtendedTest, IEvents {
     function airdrop(ERC20 _asset, address _to, uint256 _amount) public {
         uint256 balanceBefore = _asset.balanceOf(_to);
         deal(address(_asset), _to, balanceBefore + _amount);
+    }
+
+    function createProfit(uint256 _strategyAssets, uint256 _seconds) public {
+        uint256 _amount = ((_strategyAssets * lstAprWad / 1e18) * _seconds) / SECONDS_PER_YEAR;
+        createProfit(_amount);
+    }
+
+    function createProfit(uint256 _amount) public {
+        vm.prank(stethWhale);
+        steth.transfer(address(strategy), _amount);
     }
 
     function setFees(uint16 _protocolFee, uint16 _performanceFee) public {

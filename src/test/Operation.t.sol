@@ -68,7 +68,6 @@ contract OperationTest is Setup {
         vm.prank(management);
         strategy.setOpenDeposits(_openDeposits);
         assertEq(strategy.openDeposits(), _openDeposits);
-
     }
 
     function test_operation(uint256 _amount) public {
@@ -79,8 +78,67 @@ contract OperationTest is Setup {
 
         assertEq(strategy.totalAssets(), _amount, "!totalAssets");
 
+        logStrategyInfo();
+
         // Earn Interest
         skip(1 days);
+
+        logStrategyInfo();
+
+        vm.prank(management);
+        strategy.setDoHealthCheck(false);
+
+        // Report profit
+        vm.prank(keeper);
+        (uint256 profit, uint256 loss) = strategy.report();
+
+        logStrategyInfo();
+
+        // Check return Values (expect loss)
+        assertEq(profit, 0, "!profit");
+        assertGt(loss, 0, "!loss");
+
+        skip(strategy.profitMaxUnlockTime());
+
+        uint256 balanceBefore = asset.balanceOf(user);
+
+        // Withdraw all funds
+        vm.startPrank(user);
+        for (
+            uint256 _sharesRemaining = _amount;
+            _sharesRemaining > 0;
+            _sharesRemaining = strategy.balanceOf(user)
+        ) {
+            strategy.redeem(
+                Math.min(strategy.maxRedeem(user), _sharesRemaining),
+                user,
+                user
+            );
+        }
+        vm.stopPrank();
+
+        assertLe(
+            asset.balanceOf(user),
+            balanceBefore + _amount,
+            "!final balance"
+        );
+    }
+
+    function test_profitableReport(
+        uint256 _amount,
+        uint16 _profitFactor
+    ) public {
+        _amount = bound(_amount, minFuzzAmount, maxFuzzAmount);
+        _profitFactor = uint16(bound(uint256(_profitFactor), 10, MAX_BPS));
+
+        // Deposit into strategy
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+
+        assertEq(strategy.totalAssets(), _amount, "!totalAssets");
+
+        // Earn Interest
+        skip(180 days);
+        createProfit(steth.balanceOf(address(strategy)), 180 days);
 
         logStrategyInfo();
 
@@ -99,8 +157,19 @@ contract OperationTest is Setup {
         uint256 balanceBefore = asset.balanceOf(user);
 
         // Withdraw all funds
-        vm.prank(user);
-        strategy.redeem(_amount, user, user);
+        vm.startPrank(user);
+        for (
+            uint256 _sharesRemaining = _amount;
+            _sharesRemaining > 0;
+            _sharesRemaining = strategy.balanceOf(user)
+        ) {
+            strategy.redeem(
+                Math.min(strategy.maxRedeem(user), _sharesRemaining),
+                user,
+                user
+            );
+        }
+        vm.stopPrank();
 
         assertGe(
             asset.balanceOf(user),
@@ -108,285 +177,97 @@ contract OperationTest is Setup {
             "!final balance"
         );
     }
+
+    // function test_multipleDeposits(
+    //     uint256 _depositA,
+    //     uint256 _depositB,
+    //     bool report
+    // ) public {
+    //     _depositA = bound(_depositA, minFuzzAmount, maxFuzzAmount);
+    //     _depositB = bound(_depositB, minFuzzAmount, maxFuzzAmount);
+    //     uint256 _profitFactor = 100;
+
+    //     // Deposit into strategy
+    //     mintAndDepositIntoStrategy(strategy, user, _depositA);
+    //     
+    //     logStrategyInfo();
+
+    //     assertEq(strategy.totalAssets(), _depositA, "!totalAssets");
+    //     assertRelApproxEq(
+    //         strategy.estimatedTotalAssets(),
+    //         _depositA,
+    //         uint256(strategy.lstDiscountBps())
+    //     );
+
+
+    //     skip(90 days);
+    //     createProfit(steth.balanceOf(address(strategy)), 90 days);
+    //     
+    //     logStrategyInfo();
+
+    //     assertGt(strategy.estimatedTotalAssets(), _depositA);
+
+    //     if (report) {
+    //         // Report profit
+    //         vm.prank(keeper);
+    //         (uint256 profit, uint256 loss) = strategy.report();
+
+    //         logStrategyInfo();
+
+    //         // Check return Values
+    //         assertGt(profit, 0, "!profit");
+    //         assertEq(loss, 0, "!loss");
+    //     }
+
+    //     skip(1 days);
+
+    //     // Deposit into strategy
+    //     mintAndDepositIntoStrategy(strategy, user, _depositB);
+    //     
+    //     logStrategyInfo();
+
+    //     if (report) {
+    //         assertGt(
+    //             strategy.totalAssets(),
+    //             _depositA + _depositB,
+    //             "!totalAssets"
+    //         );
+    //     } else {
+    //         assertApproxEqRel(
+    //             strategy.totalAssets(),
+    //             _depositA + _depositB,
+    //             uint256(strategy.lstDiscountBps()),
+    //             "!totalAssets"
+    //         );
+    //     }
+
+    //     //assertGt(strategy.estimatedTotalAssets(), _depositA + _depositB);
+
+    //     skip(90 days);
+    //     createProfit(steth.balanceOf(address(strategy)), 90 days);
+
+    //     logStrategyInfo();
+
+    //     assertGt(strategy.estimatedTotalAssets(), _depositA + _depositB);
+
+    //     skip(strategy.profitMaxUnlockTime());
+
+    //     uint256 balanceBefore = asset.balanceOf(user);
+    //     uint256 redeemAmount = _depositA + _depositB;
+    //     redeemAmount = Math.min(redeemAmount, strategy.maxRedeem(user));
+
+    //     // Withdraw all funds
+    //     vm.prank(user);
+    //     strategy.redeem(redeemAmount, user, user);
+
+    //     assertGe(
+    //         asset.balanceOf(user),
+    //         balanceBefore + redeemAmount,
+    //         "!final balance"
+    //     );
+    // }
 
     /*
-    function test_profitableReport(
-        uint256 _amount,
-        uint16 _profitFactor
-    ) public {
-        _amount = bound(_amount, minFuzzAmount, maxFuzzAmount);
-        _profitFactor = uint16(bound(uint256(_profitFactor), 10, MAX_BPS));
-
-        // Deposit into strategy
-        mintAndDepositIntoStrategy(strategy, user, _amount);
-
-        assertEq(strategy.totalAssets(), _amount, "!totalAssets");
-
-        // Earn Interest
-        skip(1 days);
-
-        uint256 toAirdrop = susde.convertToShares(
-            (_amount * (MAX_BPS + _profitFactor)) / MAX_BPS
-        );
-        airdrop(ERC20(address(susde)), address(strategy), toAirdrop);
-        deal(address(asset), address(strategy), 0);
-
-        logStrategyInfo();
-
-        // Report profit
-        vm.prank(keeper);
-        (uint256 profit, uint256 loss) = strategy.report();
-
-        logStrategyInfo();
-
-        // Check return Values
-        assertApproxEq(
-            profit,
-            susde.convertToAssets(toAirdrop) - _amount,
-            1e6,
-            "!profit"
-        );
-        assertEq(loss, 0, "!loss");
-
-        skip(
-            Math.max(strategy.profitMaxUnlockTime(), susde.cooldownDuration())
-        );
-
-        uint256 balanceBefore = asset.balanceOf(user);
-
-        // Withdraw all funds
-        vm.prank(user);
-        strategy.redeem(_amount, user, user);
-
-        assertGe(
-            asset.balanceOf(user),
-            balanceBefore + _amount,
-            "!final balance"
-        );
-    }
-
-    function test_profitableReport_multipleProxies(
-        uint256 _amount,
-        uint16 _profitFactor,
-        uint8 _proxyCount
-    ) public {
-        _amount = bound(_amount, minFuzzAmount, maxFuzzAmount);
-        _profitFactor = uint16(bound(uint256(_profitFactor), 10, MAX_BPS));
-        _proxyCount = uint8(
-            bound(uint256(_proxyCount), 1, strategy.MAX_STRATEGY_PROXIES() + 1)
-        );
-
-        // Deposit into strategy
-        mintAndDepositIntoStrategy(strategy, user, _amount);
-        assertEq(strategy.totalAssets(), _amount, "!totalAssets");
-
-        uint256 totalAirdrop = susde.convertToShares(
-            (_amount * (MAX_BPS + _profitFactor)) / MAX_BPS
-        );
-
-        vm.expectRevert("!management");
-        strategy.addStrategyProxy();
-
-        for (uint8 i = 0; i < _proxyCount; ++i) {
-            // we already have one, so no need to clone the first
-            if (i != 0) {
-                // expect a revert on the too many proxies case
-                if (i == strategy.MAX_STRATEGY_PROXIES()) {
-                    vm.startPrank(management);
-                    vm.expectRevert();
-                    strategy.addStrategyProxy();
-                    vm.stopPrank();
-                    return;
-                }
-                vm.prank(management);
-                strategy.addStrategyProxy();
-            }
-
-            uint256 toAirdrop = totalAirdrop / _proxyCount;
-
-            airdrop(ERC20(address(susde)), address(strategy), toAirdrop);
-            deal(
-                address(asset),
-                address(strategy),
-                asset.balanceOf(address(strategy)) - (_amount / _proxyCount)
-            );
-
-            logStrategyInfo();
-
-            // Report profit
-            vm.prank(keeper);
-            (uint256 profit, uint256 loss) = strategy.report();
-
-            logStrategyInfo();
-
-            // Check return Values
-            assertGe(
-                profit,
-                susde.convertToAssets(toAirdrop) - (_amount / _proxyCount),
-                "!profit"
-            );
-            assertEq(loss, 0, "!loss");
-
-            skip(1 days); // skip 1 day
-        }
-
-        assertEq(strategy.strategyProxyCount(), _proxyCount, "!proxyCount");
-
-        skip(
-            Math.max(strategy.profitMaxUnlockTime(), susde.cooldownDuration())
-        );
-
-        uint256 balanceBefore = asset.balanceOf(user);
-
-        // Withdraw all funds
-        vm.prank(user);
-        strategy.redeem(_amount, user, user);
-
-        assertGe(
-            asset.balanceOf(user),
-            balanceBefore + _amount,
-            "!final balance"
-        );
-    }
-
-    function test_multipleDeposits(
-        uint256 _depositA,
-        uint256 _depositB,
-        bool report,
-        bool secondProxy
-    ) public {
-        _depositA = bound(_depositA, minFuzzAmount, maxFuzzAmount);
-        _depositB = bound(_depositB, minFuzzAmount, maxFuzzAmount);
-        uint256 _profitFactor = 100;
-
-        if (secondProxy) {
-            vm.prank(management);
-            strategy.addStrategyProxy();
-            assertEq(strategy.strategyProxyCount(), 2);
-        }
-
-        // Deposit into strategy
-        mintAndDepositIntoStrategy(strategy, user, _depositA);
-
-        assertEq(strategy.totalAssets(), _depositA, "!totalAssets");
-
-        assertEq(strategy.estimatedTotalAssets(), _depositA);
-        assertEq(asset.balanceOf(address(strategy)), _depositA);
-        assertEq(susde.balanceOf(address(strategy)), 0);
-        assertEq(strategy.coolingUSDe(), 0);
-
-        uint256 toAirdrop = susde.convertToShares(
-            (_depositA * (MAX_BPS + _profitFactor)) / MAX_BPS
-        );
-        airdrop(ERC20(address(susde)), address(strategy), toAirdrop);
-        deal(address(asset), address(strategy), 0);
-
-        logStrategyInfo();
-
-        assertGt(strategy.estimatedTotalAssets(), _depositA);
-        assertEq(asset.balanceOf(address(strategy)), 0);
-        assertEq(susde.balanceOf(address(strategy)), toAirdrop);
-        assertEq(strategy.coolingUSDe(), 0);
-
-        // Report profit
-        vm.prank(keeper);
-        strategy.tend();
-
-        assertGt(strategy.estimatedTotalAssets(), _depositA);
-        assertEq(asset.balanceOf(address(strategy)), 0);
-        assertEq(susde.balanceOf(address(strategy)), 0);
-        assertGt(strategy.coolingUSDe(), _depositA);
-
-        if (report) {
-            // Report profit
-            vm.prank(keeper);
-            (uint256 profit, uint256 loss) = strategy.report();
-
-            logStrategyInfo();
-
-            // Check return Values
-            assertApproxEq(
-                profit,
-                susde.convertToAssets(toAirdrop) - _depositA,
-                1e6,
-                "!profit"
-            );
-            assertEq(loss, 0, "!loss");
-        }
-
-        skip(1 days);
-
-        // Deposit into strategy
-        mintAndDepositIntoStrategy(strategy, user, _depositB);
-
-        if (report) {
-            assertGt(
-                strategy.totalAssets(),
-                _depositA + _depositB,
-                "!totalAssets"
-            );
-        } else {
-            assertEq(
-                strategy.totalAssets(),
-                _depositA + _depositB,
-                "!totalAssets"
-            );
-        }
-
-        assertGt(strategy.estimatedTotalAssets(), _depositA + _depositB);
-        assertEq(asset.balanceOf(address(strategy)), _depositB);
-        assertEq(susde.balanceOf(address(strategy)), 0);
-        assertGt(strategy.coolingUSDe(), _depositA);
-
-        toAirdrop = susde.convertToShares(
-            (_depositB * (MAX_BPS + _profitFactor)) / MAX_BPS
-        );
-        airdrop(ERC20(address(susde)), address(strategy), toAirdrop);
-        deal(address(asset), address(strategy), 0);
-
-        logStrategyInfo();
-
-        assertGt(strategy.estimatedTotalAssets(), _depositA + _depositB);
-        assertEq(asset.balanceOf(address(strategy)), 0);
-        assertEq(susde.balanceOf(address(strategy)), toAirdrop);
-        assertGt(strategy.coolingUSDe(), _depositA);
-
-        // Report profit
-        vm.prank(keeper);
-        strategy.tend();
-
-        logStrategyInfo();
-
-        assertGt(strategy.estimatedTotalAssets(), _depositA + _depositB);
-        assertEq(asset.balanceOf(address(strategy)), 0);
-        assertEq(
-            susde.balanceOf(address(strategy)),
-            secondProxy ? 0 : toAirdrop
-        );
-        assertGt(
-            strategy.coolingUSDe(),
-            secondProxy ? _depositA + _depositB : _depositA
-        );
-
-        skip(
-            Math.max(strategy.profitMaxUnlockTime(), susde.cooldownDuration())
-        );
-
-        uint256 balanceBefore = asset.balanceOf(user);
-        uint256 redeemAmount = secondProxy ? _depositA + _depositB : _depositA;
-        redeemAmount = Math.min(redeemAmount, strategy.maxRedeem(user));
-
-        // Withdraw all funds
-        vm.prank(user);
-        strategy.redeem(redeemAmount, user, user);
-
-        assertGe(
-            asset.balanceOf(user),
-            balanceBefore + redeemAmount,
-            "!final balance"
-        );
-    }
-
     function test_redeemSubset(
         uint256 _amount,
         uint256 _redeemAmount,

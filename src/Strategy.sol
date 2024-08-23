@@ -9,25 +9,28 @@ import {IWETH} from "./interfaces/IWETH.sol";
 import {IStEth} from "./interfaces/Lido/IStETH.sol";
 import {IQueue} from "./interfaces/Lido/IQueue.sol";
 import {ICurve} from "./interfaces/Curve/ICurve.sol";
+import {IChainlinkAggregator} from "./interfaces/Chainlink/IChainlinkAggregator.sol";
 
 contract Strategy is BaseHealthCheck {
     using SafeERC20 for ERC20;
 
     IWETH public constant WETH =
         IWETH(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
-    IStEth public constant StETH =
+    IStEth public constant STETH =
         IStEth(0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84);
     ICurve public constant CURVE_POOL =
         ICurve(0xDC24316b9AE028F1497c275EB9192a3Ea0f67022);
     IQueue internal constant LIDO_WITHDRAWAL_QUEUE =
         IQueue(0x889edC2eDab5f40e902b864aD4d7AdE8E412F9B1);
+    IChainlinkAggregator private constant ORACLE =
+        IChainlinkAggregator(0x86392dC19c0b719886221c78AB11eb8Cf5c52812);
 
     address private constant REFERRAL =
         0x16388463d60FFE0661Cf7F1f31a7D658aC790ff7;
     int128 private constant ETH_CRV_LP_IDX = 0;
     int128 private constant LST_CRV_LP_IDX = 1;
 
-    uint16 public maxTendBasefeeGwei = 1; // 1 gwei
+    uint16 public maxTendBasefeeGwei = 5; // 5 gwei
     uint96 public maxSingleTrade = 1_000e18;
     uint16 public maxSlippageBps = 100;
     uint16 public lstDiscountBps = 50;
@@ -37,9 +40,9 @@ contract Strategy is BaseHealthCheck {
     uint256 public depositLimit;
     mapping(address => bool) public allowedDepositors;
 
-    constructor(
-        string memory _name
-    ) BaseHealthCheck(address(WETH), _name) {}
+    constructor(string memory _name) BaseHealthCheck(address(WETH), _name) {
+        STETH.approve(address(CURVE_POOL), type(uint256).max);
+    }
 
     // Make eth receivable
     receive() external payable {}
@@ -49,12 +52,21 @@ contract Strategy is BaseHealthCheck {
     //////////////////////////////////////////////////////////////*/
 
     function estimatedTotalAssets() public view returns (uint256) {
-        uint256 _lstBalance = StETH.balanceOf(address(this));
-        _lstBalance =
-            (_lstBalance * (MAX_BPS - uint256(maxSlippageBps))) /
-            MAX_BPS;
+        uint256 _lstBalance = STETH.balanceOf(address(this));
+        _lstBalance = (_lstBalance * pessimisticLSTPrice()) / 1e18;
 
         return asset.balanceOf(address(this)) + _lstBalance;
+    }
+
+    function pessimisticLSTPrice() private view returns (uint256) {
+        IChainlinkAggregator.RoundData memory _roundData = ORACLE
+            .latestRoundData();
+
+        return
+            Math.min(
+                1e18 - (uint256(lstDiscountBps) * 1e14),
+                uint256(_roundData.answer)
+            );
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -77,8 +89,8 @@ contract Strategy is BaseHealthCheck {
             LST_CRV_LP_IDX,
             _amount
         );
-        if (_amountOut < _amount && !StETH.isStakingPaused()) {
-            StETH.submit{value: _amount}(REFERRAL);
+        if (_amountOut < _amount && !STETH.isStakingPaused()) {
+            STETH.submit{value: _amount}(REFERRAL);
         } else {
             CURVE_POOL.exchange{value: _amount}(
                 ETH_CRV_LP_IDX,
@@ -93,7 +105,6 @@ contract Strategy is BaseHealthCheck {
      * @param _amount, The amount of 'asset' to be freed.
      */
     function _freeFunds(uint256 _amount) internal override {
-
         uint256 _slippageAllowance = (_amount *
             (MAX_BPS - uint256(maxSlippageBps))) / MAX_BPS;
 
@@ -239,10 +250,13 @@ contract Strategy is BaseHealthCheck {
         openDeposits = _openDeposits;
     }
 
-    /// @notice Set whether a depositor is allowed or not 
+    /// @notice Set whether a depositor is allowed or not
     /// @param _depositor the depositor to allow/disallow
-    /// @param _allowed whether the depositor is allowed 
-    function setAllowedDepositor(address _depositor, bool _allowed) external onlyManagement {
+    /// @param _allowed whether the depositor is allowed
+    function setAllowedDepositor(
+        address _depositor,
+        bool _allowed
+    ) external onlyManagement {
         allowedDepositors[_depositor] = _allowed;
     }
 
